@@ -1,19 +1,89 @@
 from ultralytics import YOLO
 import cv2
 import numpy as np
+import pennylane as qml
 import requests
 import sys
 import time
 
 
 MODEL_PATH = "yolov8m.pt"
-MOBILE_IP = "100.67.199.6:8080"
-VIDEO_URL = f"http://{MOBILE_IP}/video"
+MOBILE_IP = "100.66.222.107:8080"
+VIDEO_URLS = [
+    f"http://{MOBILE_IP}/video",
+    f"http://{MOBILE_IP}/videofeed",
+    f"http://{MOBILE_IP}/mjpegfeed",
+]
 GPS_URL = f"http://{MOBILE_IP}/gps.json"
 OUTPUT_PATH = "survivor_detection_output.mp4"
-PERSON_CLASS_ID = 0
 CONFIDENCE_THRESHOLD = 0.45
 GPS_INTERVAL_SECONDS = 1
+
+# COCO classes from yolov8m.pt that represent living beings.
+LIVING_CLASS_IDS = {
+    0,   # person
+    14,  # bird
+    15,  # cat
+    16,  # dog
+    17,  # horse
+    18,  # sheep
+    19,  # cow
+    20,  # elephant
+    21,  # bear
+    22,  # zebra
+    23,  # giraffe
+}
+
+
+quantum_device = qml.device("default.qubit", wires=4)
+
+
+@qml.qnode(quantum_device)
+def quantum_feature_circuit(features):
+    for wire in range(4):
+        qml.RY(features[wire], wires=wire)
+        qml.RZ(features[wire + 4], wires=wire)
+
+    qml.CNOT(wires=[0, 1])
+    qml.CNOT(wires=[1, 2])
+    qml.CNOT(wires=[2, 3])
+    qml.CNOT(wires=[3, 0])
+
+    return [qml.expval(qml.PauliZ(wire)) for wire in range(4)]
+
+
+def extract_quantum_features(crop):
+    if crop is None or crop.size == 0:
+        return np.zeros(4, dtype=np.float32)
+
+    resized = cv2.resize(crop, (64, 64), interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(resized, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+
+    b_mean, g_mean, r_mean = resized.mean(axis=(0, 1)) / 255.0
+    saturation_mean = hsv[:, :, 1].mean() / 255.0
+    value_mean = hsv[:, :, 2].mean() / 255.0
+    contrast = gray.std() / 255.0
+    edges = cv2.Canny(gray, 60, 160)
+    edge_ratio = cv2.countNonZero(edges) / float(edges.size)
+    aspect_ratio = min(crop.shape[1] / max(crop.shape[0], 1), 2.0) / 2.0
+
+    features = np.array(
+        [
+            r_mean,
+            g_mean,
+            b_mean,
+            saturation_mean,
+            value_mean,
+            contrast,
+            edge_ratio,
+            aspect_ratio,
+        ],
+        dtype=np.float32,
+    )
+
+    angles = np.clip(features, 0.0, 1.0) * np.pi
+    return np.asarray(quantum_feature_circuit(angles), dtype=np.float32)
 
 
 def get_gps_coordinates(gps_url, last_lat, last_lon):
@@ -22,6 +92,12 @@ def get_gps_coordinates(gps_url, last_lat, last_lon):
         return gps_data["latitude"], gps_data["longitude"]
     except (requests.RequestException, KeyError, ValueError):
         return last_lat, last_lon
+
+
+def format_gps_label(lat, lon):
+    if lat is None or lon is None:
+        return "GPS unavailable"
+    return f"Lat: {lat} Lon: {lon}"
 
 
 def clamp_box(box, frame_shape):
@@ -37,32 +113,6 @@ def clamp_box(box, frame_shape):
         return None
 
     return x1, y1, x2, y2
-
-
-def estimate_injury_status(person_crop, box_width, box_height):
-    if person_crop is None or person_crop.size == 0:
-        return "Injury Unknown"
-
-    aspect_ratio = box_width / max(box_height, 1)
-    hsv = cv2.cvtColor(person_crop, cv2.COLOR_BGR2HSV)
-
-    lower_red_1 = np.array([0, 70, 50])
-    upper_red_1 = np.array([10, 255, 255])
-    lower_red_2 = np.array([170, 70, 50])
-    upper_red_2 = np.array([180, 255, 255])
-
-    red_mask_1 = cv2.inRange(hsv, lower_red_1, upper_red_1)
-    red_mask_2 = cv2.inRange(hsv, lower_red_2, upper_red_2)
-    red_mask = cv2.bitwise_or(red_mask_1, red_mask_2)
-
-    red_pixels = cv2.countNonZero(red_mask)
-    total_pixels = max(person_crop.shape[0] * person_crop.shape[1], 1)
-    red_ratio = red_pixels / total_pixels
-
-    if aspect_ratio > 0.85 or red_ratio > 0.08:
-        return "Possible Injury"
-
-    return "No visible injury signs"
 
 
 def draw_text_with_background(frame, text, position, font_scale, text_color, bg_color):
@@ -82,9 +132,8 @@ def draw_text_with_background(frame, text, position, font_scale, text_color, bg_
         (x, y - text_height - baseline - 6),
         (x + text_width + 8, y + baseline),
         bg_color,
-        -1
+        -1,
     )
-
     cv2.putText(
         frame,
         text,
@@ -92,18 +141,81 @@ def draw_text_with_background(frame, text, position, font_scale, text_color, bg_
         font,
         font_scale,
         text_color,
-        thickness
+        thickness,
     )
+
+
+def open_mobile_stream():
+    for video_url in VIDEO_URLS:
+        cap = cv2.VideoCapture(video_url)
+
+        if not cap.isOpened():
+            cap.release()
+            continue
+
+        ret, _ = cap.read()
+        if ret:
+            print(f"Connected to video stream: {video_url}")
+            return cap
+
+        cap.release()
+
+    print("Error: Unable to connect to mobile video stream")
+    print("Tried these URLs:")
+    for video_url in VIDEO_URLS:
+        print(f"  {video_url}")
+    print("Check that the mobile camera server is running and MOBILE_IP is correct.")
+    sys.exit(1)
+
+
+def annotate_survivors(frame, model, gps_label):
+    results = model(
+        frame,
+        conf=CONFIDENCE_THRESHOLD,
+        iou=0.45,
+        max_det=100,
+        verbose=False,
+    )
+
+    annotated_frame = frame.copy()
+
+    for result in results:
+        for box in result.boxes:
+            class_id = int(box.cls[0])
+
+            if class_id not in LIVING_CLASS_IDS:
+                continue
+
+            clamped_box = clamp_box(box.xyxy[0], frame.shape)
+            if clamped_box is None:
+                continue
+
+            x1, y1, x2, y2 = clamped_box
+            survivor_crop = frame[y1:y2, x1:x2]
+
+            # Quantum features are extracted for every accepted survivor crop.
+            # They stay internal because the required output is only survivor + GPS.
+            _ = extract_quantum_features(survivor_crop)
+
+            box_color = (0, 255, 0)
+            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 2)
+
+            label = f"Survivor | {gps_label}"
+            draw_text_with_background(
+                annotated_frame,
+                label,
+                (x1, y1 - 12),
+                0.55,
+                (0, 0, 0),
+                box_color,
+            )
+
+    return annotated_frame
 
 
 def main():
     model = YOLO(MODEL_PATH)
-    cap = cv2.VideoCapture(VIDEO_URL)
-
-    if not cap.isOpened():
-        print("Error: Unable to connect to video stream")
-        print(f"Stream URL: {VIDEO_URL}")
-        sys.exit(1)
+    cap = open_mobile_stream()
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = None
@@ -125,12 +237,11 @@ def main():
 
             if out is None:
                 frame_height, frame_width = frame.shape[:2]
-
                 out = cv2.VideoWriter(
                     OUTPUT_PATH,
                     fourcc,
                     20.0,
-                    (frame_width, frame_height)
+                    (frame_width, frame_height),
                 )
 
                 if not out.isOpened():
@@ -138,128 +249,16 @@ def main():
                     break
 
             current_time = time.time()
-
             if current_time - last_gps_check >= GPS_INTERVAL_SECONDS:
                 last_gps_check = current_time
                 last_lat, last_lon = get_gps_coordinates(
                     GPS_URL,
                     last_lat,
-                    last_lon
+                    last_lon,
                 )
 
-            if last_lat is not None and last_lon is not None:
-                gps_label = f"Lat: {last_lat} Lon: {last_lon}"
-            else:
-                gps_label = "GPS unavailable"
-
-            results = model(
-                frame,
-                conf=CONFIDENCE_THRESHOLD,
-                iou=0.45,
-                max_det=100
-            )
-
-            annotated_frame = frame.copy()
-            survivor_count = 0
-
-            for result in results:
-                for box in result.boxes:
-                    class_id = int(box.cls[0])
-
-                    if class_id != PERSON_CLASS_ID:
-                        continue
-
-                    clamped_box = clamp_box(box.xyxy[0], frame.shape)
-
-                    if clamped_box is None:
-                        continue
-
-                    x1, y1, x2, y2 = clamped_box
-
-                    box_width = x2 - x1
-                    box_height = y2 - y1
-                    confidence = float(box.conf[0])
-
-                    person_crop = frame[y1:y2, x1:x2]
-                    injury_status = estimate_injury_status(
-                        person_crop,
-                        box_width,
-                        box_height
-                    )
-
-                    survivor_count += 1
-
-                    if injury_status == "Possible Injury":
-                        box_color = (0, 0, 255)
-                    else:
-                        box_color = (0, 255, 0)
-
-                    cv2.rectangle(
-                        annotated_frame,
-                        (x1, y1),
-                        (x2, y2),
-                        box_color,
-                        2
-                    )
-
-                    label_1 = f"Survivor {confidence:.2f}"
-                    label_2 = f"H: {box_height}px W: {box_width}px"
-                    label_3 = injury_status
-                    label_4 = gps_label
-
-                    draw_text_with_background(
-                        annotated_frame,
-                        label_1,
-                        (x1, y1 - 78),
-                        0.65,
-                        (0, 0, 0),
-                        box_color
-                    )
-
-                    draw_text_with_background(
-                        annotated_frame,
-                        label_2,
-                        (x1, y1 - 52),
-                        0.55,
-                        (255, 255, 255),
-                        (60, 60, 60)
-                    )
-
-                    draw_text_with_background(
-                        annotated_frame,
-                        label_3,
-                        (x1, y1 - 28),
-                        0.55,
-                        (255, 255, 255),
-                        (0, 0, 180) if injury_status == "Possible Injury" else (0, 120, 0)
-                    )
-
-                    draw_text_with_background(
-                        annotated_frame,
-                        label_4,
-                        (x1, y2 + 24),
-                        0.5,
-                        (255, 255, 255),
-                        (80, 80, 80)
-                    )
-
-            draw_text_with_background(
-                annotated_frame,
-                f"Survivors: {survivor_count}",
-                (20, 40),
-                0.75,
-                (0, 0, 0),
-                (0, 255, 255)
-            )
-
-            draw_text_with_background(
-                annotated_frame,
-                gps_label,
-                (20, 78),
-                0.65,
-                (255, 255, 255),
-                (80, 80, 80)
-            )
+            gps_label = format_gps_label(last_lat, last_lon)
+            annotated_frame = annotate_survivors(frame, model, gps_label)
 
             out.write(annotated_frame)
             video_saved = True

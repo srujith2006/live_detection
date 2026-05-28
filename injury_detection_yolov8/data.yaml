@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 2
+names: ['injured-animals', 'normal_animals']
+
+roboflow:
+  workspace: sanskriti-qcfoc
+  project: injury-detection-gyxwi
+  version: 3
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/sanskriti-qcfoc/injury-detection-gyxwi/dataset/3

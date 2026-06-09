@@ -322,28 +322,19 @@ while True:
     # ========================================================
 
     cv2.imshow("Hybrid Quantum GPS Detection", annotated_frame)
-
-    # ========================================================
     # EXIT
-    # ========================================================
-
     if cv2.waitKey(1) == ord('q'):
         break
 
-# ============================================================
 # RELEASE EVERYTHING
-# ============================================================
-
 cap.release()
 if out is not None:
     out.release()
 
 cv2.destroyAllWindows()
 
-print("===================================================")
 if video_saved:
     print("VIDEO SAVED SUCCESSFULLY")
     print(f"Output File: {output_path}")
 else:
     print("No video was saved because no frames were written")
-print("===================================================")

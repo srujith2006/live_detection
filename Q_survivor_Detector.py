@@ -8,7 +8,7 @@ import time
 
 
 MODEL_PATH = "yolov8m.pt"
-MOBILE_IP = "100.66.222.107:8080"
+MOBILE_IP = "192.168.206.138:8080"
 VIDEO_URLS = [
     f"http://{MOBILE_IP}/video",
     f"http://{MOBILE_IP}/videofeed",
@@ -276,7 +276,6 @@ def main():
 
         cv2.destroyAllWindows()
 
-    print("===================================================")
 
     if video_saved:
         print("SURVIVOR DETECTION VIDEO SAVED SUCCESSFULLY")
@@ -284,7 +283,6 @@ def main():
     else:
         print("No video was saved because no frames were written")
 
-    print("===================================================")
 
 
 if __name__ == "__main__":

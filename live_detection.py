@@ -7,7 +7,7 @@ import time
 model = YOLO("yolov8m.pt")
 
 # Mobile stream URL
-url = "http://100.72.58.162:8080/video"
+url = "http://192.168.1.103:8080/video"
 
 # Capture video
 cap = cv2.VideoCapture(url)
